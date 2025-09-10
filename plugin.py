@@ -13,20 +13,71 @@ from src.plugin_system import (
     MaiMessages,
     ToolParamType,
 )
+import aiohttp
+import json
 
 
-class CompareNumbersTool(BaseTool):
-    """比较两个数大小的工具"""
+class WebSearchTool(BaseTool):
+    """从网络上搜索的工具"""
 
-    name = "compare_numbers"
-    description = "使用工具 比较两个数的大小，返回较大的数"
+    name = "search_web"
+    description = "使用工具 从网络上搜索某关键字的相关网页"
     parameters = [
-        ("num1", ToolParamType.FLOAT, "第一个数字", True, None),
-        ("num2", ToolParamType.FLOAT, "第二个数字", True, None),
+        (
+            "keywords",
+            ToolParamType.STRING,
+            "搜索关键字，支持多个关键字用空格分隔，若关键字必须包含则用双引号\"\"包裹，若关键字必须排除则在关键字前加' -'(英文空格减号)",
+            True,
+            None,
+        ),
     ]
+    available_for_llm = True
+
+    async def search(self, kw: str):
+        endpoint = "https://s.jina.ai/"
+        headers = {
+            "Authorization": f"Bearer {self.plugin_config['provider']['jina_api_key']}",
+            "Content-Type": "application/json",
+        }
+        body = {
+            "q": kw,
+        }
+
+        if self.plugin_config["search"]["search_nation"] != "not-specified":
+            body["gl"] = self.plugin_config["search"]["search_nation"]
+        if self.plugin_config["search"]["search_language"] != "not-specified":
+            body["hl"] = self.plugin_config["search"]["search_language"]
+
+        if self.plugin_config["search"]["crawl_details"]:
+            match self.plugin_config["search"]["engine_mode"]:
+                case "fast":
+                    headers["X-Engine"] = "direct"
+                case "quality":
+                    headers["X-Engine"] = "browser"
+            if self.plugin_config["search"]["timeout"] > 0:
+                headers["X-Timeout"] = str(self.plugin_config["search"]["timeout"])
+            if self.plugin_config["search"]["remove_pictures"]:
+                headers["X-Retain-Images"] = "none"
+            if self.plugin_config["search"]["move_links_to_end"]:
+                headers["X-With-Links-Summary"] = "true"        
+            if self.plugin_config["search"]["move_pics_to_end"]:
+                headers["X-With-Images-Summary"] = "true"
+            if self.plugin_config["search"]["add_pic_alt"]:
+                headers["X-With-Generated-Alt"] = "true"    
+        else:
+            headers["X-Respond-With"] = "no-content"
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                endpoint, headers=headers, data=json.dumps(body)
+            ) as response:
+                if response.status == 200:
+                    return await response.text()
+                else:
+                    raise Exception(f"搜索请求失败，状态码: {response.status}")
 
     async def execute(self, function_args: dict[str, Any]) -> dict[str, Any]:
-        """执行比较两个数的大小
+        """执行从网络上搜索某关键字的相关网页
 
         Args:
             function_args: 工具参数
@@ -34,177 +85,250 @@ class CompareNumbersTool(BaseTool):
         Returns:
             dict: 工具执行结果
         """
-        num1: int | float = function_args.get("num1")  # type: ignore
-        num2: int | float = function_args.get("num2")  # type: ignore
+        keywords: str = function_args.get("keywords")  # type: ignore
 
         try:
-            if num1 > num2:
-                result = f"{num1} 大于 {num2}"
-            elif num1 < num2:
-                result = f"{num1} 小于 {num2}"
-            else:
-                result = f"{num1} 等于 {num2}"
-
-            return {"name": self.name, "content": result}
+            search_results = await self.search(keywords)
+            return {"name": self.name, "content": search_results}
         except Exception as e:
-            return {"name": self.name, "content": f"比较数字失败，炸了: {str(e)}"}
+            return {"name": self.name, "content": f"搜索失败: {str(e)}"}
 
+class UrlCrawlTool(BaseTool):
+    """从URL提取内容的工具"""
 
-# ===== Action组件 =====
-class HelloAction(BaseAction):
-    """问候Action - 简单的问候动作"""
-
-    # === 基本信息（必须填写）===
-    action_name = "hello_greeting"
-    action_description = "向用户发送问候消息"
-    activation_type = ActionActivationType.ALWAYS  # 始终激活
-
-    # === 功能描述（必须填写）===
-    action_parameters = {"greeting_message": "要发送的问候消息"}
-    action_require = ["需要发送友好问候时使用", "当有人向你问好时使用", "当你遇见没有见过的人时使用"]
-    associated_types = ["text"]
-
-    async def execute(self) -> Tuple[bool, str]:
-        """执行问候动作 - 这是核心功能"""
-        # 发送问候消息
-        greeting_message = self.action_data.get("greeting_message", "")
-        base_message = self.get_config("greeting.message", "嗨！很开心见到你！😊")
-        message = base_message + greeting_message
-        await self.send_text(message)
-
-        return True, "发送了问候消息"
-
-
-class ByeAction(BaseAction):
-    """告别Action - 只在用户说再见时激活"""
-
-    action_name = "bye_greeting"
-    action_description = "向用户发送告别消息"
-
-    # 使用关键词激活
-    activation_type = ActionActivationType.KEYWORD
-
-    # 关键词设置
-    activation_keywords = ["再见", "bye", "88", "拜拜"]
-    keyword_case_sensitive = False
-
-    action_parameters = {"bye_message": "要发送的告别消息"}
-    action_require = [
-        "用户要告别时使用",
-        "当有人要离开时使用",
-        "当有人和你说再见时使用",
+    name = "crawl_url"
+    description = "使用工具 从指定URL提取网页内容"
+    parameters = [
+        (
+            "url",
+            ToolParamType.STRING,
+            "要提取内容的网页URL，必须以http://或https://开头",
+            True,
+            None,
+        ),
     ]
-    associated_types = ["text"]
+    available_for_llm = True
 
-    async def execute(self) -> Tuple[bool, str]:
-        bye_message = self.action_data.get("bye_message", "")
+    async def crawl(self, url: str):
+        endpoint = "https://r.jina.ai/"
+        headers = {
+            "Authorization": f"Bearer {self.plugin_config['provider']['jina_api_key']}",
+            "Content-Type": "application/json",
+        }
+        body = {
+            "url": url,
+        }
 
-        message = f"再见！期待下次聊天！👋{bye_message}"
-        await self.send_text(message)
-        return True, "发送了告别消息"
+        match self.plugin_config["extract"]["engine_mode"]:
+            case "fast":
+                headers["X-Engine"] = "direct"
+            case "quality":
+                headers["X-Engine"] = "browser"
+        if self.plugin_config["extract"]["timeout"] > 0:
+            headers["X-Timeout"] = str(self.plugin_config["extract"]["timeout"])
+        if self.plugin_config["extract"]["follow_redirect"]:
+            headers["X-Follow-Redirects"] = "true"
+        if self.plugin_config["extract"]["use_custom_prehandler_scripts"]:
+            headers["X-Use-Custom-Prehandler-Scripts"] = "true"
+            if self.plugin_config["extract"]["custom_prehandler_scripts_list"]:
+                headers["X-Custom-Prehandler-Scripts-List"] = ",".join(
+                    self.plugin_config["extract"]["custom_prehandler_scripts_list"]
+                )
+        if self.plugin_config["extract"]["include_shadow_dom"]:
+            headers["X-Include-Shadow-DOM"] = "true"
+        if self.plugin_config["extract"]["include_iframes"]:
+            headers["X-Include-Iframes"] = "true"
+        if self.plugin_config["extract"]["remove_pictures"]:
+            headers["X-Retain-Images"] = "none"
+        if self.plugin_config["extract"]["use_readerlm_v2"]:
+            headers["X-Use-ReaderLM-V2"] = "true"
+        if self.plugin_config["extract"]["move_links_to_end"]:
+            headers["X-With-Links-Summary"] = "true"        
+        if self.plugin_config["extract"]["move_pics_to_end"]:
+            headers["X-With-Images-Summary"] = "true"
+        if self.plugin_config["extract"]["add_pic_alt"]:
+            headers["X-With-Generated-Alt"] = "true"    
+        if self.plugin_config["extract"]["optimize_for_gpt_oss"]:
+            headers["X-Optimize-For-GPT-OSS"] = "true"
 
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                endpoint, headers=headers, data=json.dumps(body)
+            ) as response:
+                if response.status == 200:
+                    return await response.text()
+                else:
+                    raise Exception(f"内容提取请求失败，状态码: {response.status}")
+                
+    async def execute(self, function_args: dict[str, Any]) -> dict[str, Any]:
+        """执行从指定URL提取网页内容
 
-class TimeCommand(BaseCommand):
-    """时间查询Command - 响应/time命令"""
+        Args:
+            function_args: 工具参数
 
-    command_name = "time"
-    command_description = "查询当前时间"
+        Returns:
+            dict: 工具执行结果
+        """
+        url: str = function_args.get("url")  # type: ignore
 
-    # === 命令设置（必须填写）===
-    command_pattern = r"^/time$"  # 精确匹配 "/time" 命令
-
-    async def execute(self) -> Tuple[bool, str, bool]:
-        """执行时间查询"""
-        import datetime
-
-        # 获取当前时间
-        time_format: str = self.get_config("time.format", "%Y-%m-%d %H:%M:%S")  # type: ignore
-        now = datetime.datetime.now()
-        time_str = now.strftime(time_format)
-
-        # 发送时间信息
-        message = f"⏰ 当前时间：{time_str}"
-        await self.send_text(message)
-
-        return True, f"显示了当前时间: {time_str}", True
-
-
-class PrintMessage(BaseEventHandler):
-    """打印消息事件处理器 - 处理打印消息事件"""
-
-    event_type = EventType.ON_MESSAGE
-    handler_name = "print_message_handler"
-    handler_description = "打印接收到的消息"
-
-    async def execute(self, message: MaiMessages | None) -> Tuple[bool, bool, str | None, None]:
-        """执行打印消息事件处理"""
-        # 打印接收到的消息
-        if self.get_config("print_message.enabled", False):
-            print(f"接收到消息: {message.raw_message if message else '无效消息'}")
-        return True, True, "消息已打印", None
-
+        try:
+            crawl_result = await self.crawl(url)
+            return {"name": self.name, "content": crawl_result}
+        except Exception as e:
+            return {"name": self.name, "content": f"内容提取失败: {str(e)}"}
 
 # ===== 插件注册 =====
 
 
 @register_plugin
-class HelloWorldPlugin(BasePlugin):
-    """Hello World插件 - 你的第一个MaiCore插件"""
+class WebCrawlPlugin(BasePlugin):
+    """WebCrawl 插件 - 基于Jina服务提供网页爬虫相关的工具和功能"""
 
     # 插件基本信息
-    plugin_name: str = "hello_world_plugin"  # 内部标识符
+    plugin_name: str = "cky-web-crawl"  # 内部标识符
     enable_plugin: bool = True
     dependencies: List[str] = []  # 插件依赖列表
     python_dependencies: List[str] = []  # Python包依赖列表
     config_file_name: str = "config.toml"  # 配置文件名
 
     # 配置节描述
-    config_section_descriptions = {"plugin": "插件基本信息", "greeting": "问候功能配置", "time": "时间查询配置"}
+    config_section_descriptions = {
+        "plugin": "插件基本信息",
+        "provider": "Jina 服务配置",
+        "search": "搜索功能配置",
+        "extract": "URL 内容提取功能配置",
+    }
 
     # 配置Schema定义
     config_schema: dict = {
         "plugin": {
-            "name": ConfigField(type=str, default="hello_world_plugin", description="插件名称"),
-            "version": ConfigField(type=str, default="1.0.0", description="插件版本"),
-            "enabled": ConfigField(type=bool, default=False, description="是否启用插件"),
-        },
-        "greeting": {
-            "message": ConfigField(
-                type=list, default=["嗨！很开心见到你！😊", "Ciallo～(∠・ω< )⌒★"], description="默认问候消息"
+            "name": ConfigField(
+                type=str, default="cky-web-crawl", description="插件名称"
             ),
-            "enable_emoji": ConfigField(type=bool, default=True, description="是否启用表情符号"),
+            "version": ConfigField(type=str, default="1.0.0", description="插件版本"),
+            "enabled": ConfigField(
+                type=bool, default=False, description="是否启用插件"
+            ),
         },
-        "time": {"format": ConfigField(type=str, default="%Y-%m-%d %H:%M:%S", description="时间显示格式")},
-        "print_message": {"enabled": ConfigField(type=bool, default=True, description="是否启用打印")},
+        "provider": {
+            # "use_api_key": ConfigField(
+            #     type=bool, default=False, description="是否使用Jina API Key"
+            # ),
+            "jina_api_key": ConfigField(
+                type=str, default="", description="Jina API Key", required=True
+            ),
+        },
+        "search": {
+            "search_nation": ConfigField(
+                type=str,
+                default="CN",
+                description="搜索国家/地区代码",
+                choices=[
+                    "not-specified",
+                    "US",
+                    "CN",
+                    "JP",
+                    "DE",
+                    "FR",
+                    "GB",
+                    "IN",
+                    "CA",
+                    "AU",
+                    "BR",
+                    "RU",
+                    "IT",
+                    "ES",
+                ],
+            ),
+            "search_language": ConfigField(
+                type=str,
+                default="zh-cn",
+                description="搜索语言代码",
+                choices=["not-specified", "en", "zh-cn", "ja", "de", "fr", "es"],
+            ),
+            "crawl_details": ConfigField(
+                type=bool, default=False, description="获取每个搜索结果 URL 的具体信息"
+            ),
+            "timeout": ConfigField(
+                type=int,
+                default=10,
+                description="加载超时时间（秒）(获取每个 URL 结果时)",
+            ),
+            "engine_mode": ConfigField(
+                type=str,
+                default="default",
+                description="引擎模式 (平衡/快速/质量) (获取每个 URL 结果时)",
+                choices=["default", "fast", "quality"],
+            ),
+            "remove_pictures": ConfigField(
+                type=bool,
+                default=True,
+                description="移除图片内容 (获取每个 URL 结果时)",
+            ),
+            "move_links_to_end": ConfigField(
+                type=bool,
+                default=True,
+                description="将链接移到内容末尾 (获取每个 URL 结果时)",
+            ),
+            "move_pics_to_end": ConfigField(
+                type=bool,
+                default=True,
+                description="将图片链接移到内容末尾 (获取每个 URL 结果时)",
+            ),
+            "add_pic_alt": ConfigField(
+                type=bool,
+                default=True,
+                description="包含图片说明Alt文本 (获取每个 URL 结果时)",
+            ),
+        },
+        "extract": {
+            "timeout": ConfigField(
+                type=int, default=10, description="加载超时时间（秒）"
+            ),
+            "follow_redirect": ConfigField(
+                type=bool, default=True, description="跟随重定向"
+            ),
+            "use_custom_prehandler_scripts": ConfigField(
+                type=bool, default=False, description="是否使用自定义预处理脚本"
+            ),
+            "custom_prehandler_scripts_list": ConfigField(
+                type=list, default=[], description="自定义预处理脚本列表"
+            ),
+            "include_shadow_dom": ConfigField(
+                type=bool, default=False, description="包含Shadow DOM内容"
+            ),
+            "include_iframes": ConfigField(
+                type=bool, default=False, description="包含iframe内容"
+            ),
+            "remove_pictures": ConfigField(
+                type=bool, default=True, description="移除图片内容"
+            ),
+            "use_readerlm_v2": ConfigField(
+                type=bool, default=False, description="使用ReaderLM V2进行内容提取"
+            ),
+            "move_links_to_end": ConfigField(
+                type=bool, default=True, description="将链接移到内容末尾"
+            ),
+            "move_pics_to_end": ConfigField(
+                type=bool, default=True, description="将图片链接移到内容末尾"
+            ),
+            "add_pic_alt": ConfigField(
+                type=bool, default=True, description="包含图片说明Alt文本"
+            ),
+            "optimize_for_gpt_oss": ConfigField(
+                type=bool, default=False, description="启用为GPT-OSS优化"
+            ),
+            "engine_mode": ConfigField(
+                type=str,
+                default="default",
+                description="引擎模式 (平衡/快速/质量)",
+                choices=["default", "fast", "quality"],
+            ),
+        },
     }
 
     def get_plugin_components(self) -> List[Tuple[ComponentInfo, Type]]:
         return [
-            (HelloAction.get_action_info(), HelloAction),
-            (CompareNumbersTool.get_tool_info(), CompareNumbersTool),  # 添加比较数字工具
-            (ByeAction.get_action_info(), ByeAction),  # 添加告别Action
-            (TimeCommand.get_command_info(), TimeCommand),
-            (PrintMessage.get_handler_info(), PrintMessage),
+            (WebSearchTool.get_tool_info(), WebSearchTool), 
+            (UrlCrawlTool.get_tool_info(), UrlCrawlTool),
         ]
-
-
-# @register_plugin
-# class HelloWorldEventPlugin(BaseEPlugin):
-#     """Hello World事件插件 - 处理问候和告别事件"""
-
-#     plugin_name = "hello_world_event_plugin"
-#     enable_plugin = False
-#     dependencies = []
-#     python_dependencies = []
-#     config_file_name = "event_config.toml"
-
-#     config_schema = {
-#         "plugin": {
-#             "name": ConfigField(type=str, default="hello_world_event_plugin", description="插件名称"),
-#             "version": ConfigField(type=str, default="1.0.0", description="插件版本"),
-#             "enabled": ConfigField(type=bool, default=True, description="是否启用插件"),
-#         },
-#     }
-
-#     def get_plugin_components(self) -> List[Tuple[ComponentInfo, Type]]:
-#         return [(PrintMessage.get_handler_info(), PrintMessage)]
